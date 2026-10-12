@@ -1,0 +1,193 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  username String? @unique
+  name String
+  passwordHash String
+  role String @default("AGENT")
+  sessions Session[]
+  memberships PageMember[]
+  reads ConversationRead[]
+  createdAt DateTime @default(now())
+}
+model Session {
+  id String @id
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  csrf String
+}
+model Page {
+  id String @id @default(cuid())
+  metaId String @unique
+  name String
+  category String @default("Facebook Page")
+  color String @default("#6366f1")
+  demo Boolean @default(false)
+  aiEnabled Boolean @default(false)
+  knowledgeRevision Int @default(0)
+  tone String @default("Thân thiện, ngắn gọn, lịch sự. Không bịa thông tin.")
+  connection String @default("DISCONNECTED")
+  tokenEncrypted String?
+  lastError String?
+  lastWebhookAt DateTime?
+  members PageMember[]
+  conversations Conversation[]
+  sources KnowledgeSource[]
+  createdAt DateTime @default(now())
+}
+model PageMember {
+  pageId String
+  userId String
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([pageId, userId])
+}
+model Conversation {
+  id String @id @default(cuid())
+  pageId String
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  psid String
+  customerName String
+  status String @default("AI_ACTIVE")
+  version Int @default(0)
+  assignedTo String?
+  resolved Boolean @default(false)
+  lastCustomerAt DateTime?
+  lastIncomingAt DateTime?
+  lastMessageAt DateTime @default(now())
+  preview String @default("")
+  messages Message[]
+  outbound OutboundJob[]
+  reads ConversationRead[]
+  runs AiRun[]
+  @@unique([pageId, psid])
+  @@index([pageId, lastMessageAt])
+}
+model ConversationRead {
+  conversationId String
+  userId String
+  at DateTime @default(now())
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([conversationId, userId])
+}
+model Message {
+  id String @id @default(cuid())
+  conversationId String
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  metaId String? @unique
+  idempotencyKey String? @unique
+  role String
+  text String
+  attachments Json?
+  outbound OutboundJob?
+  state String @default("RECEIVED")
+  error String?
+  sentAt DateTime?
+  receivedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  @@index([conversationId, createdAt])
+}
+model WebhookEvent {
+  id String @id
+  payload Json
+  state String @default("PENDING")
+  error String?
+  attempts Int @default(0)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+model OutboundJob {
+  id String @id @default(cuid())
+  messageId String @unique
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  version Int
+  knowledgeRevision Int @default(0)
+  state String @default("PENDING")
+  attempts Int @default(0)
+  nextAt DateTime @default(now())
+  error String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+}
+model KnowledgeSource {
+  id String @id @default(cuid())
+  pageId String
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  title String
+  kind String @default("TEXT")
+  url String?
+  draft String
+  published String?
+  version Int @default(0)
+  publishedAt DateTime?
+  embeddingConfig String?
+  updatedBy String
+  chunks KnowledgeChunk[]
+  versions KnowledgeVersion[]
+  updatedAt DateTime @updatedAt
+}
+model KnowledgeVersion {
+  id String @id @default(cuid())
+  sourceId String
+  source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  version Int
+  content String
+  userId String
+  createdAt DateTime @default(now())
+}
+model KnowledgeChunk {
+  id String @id @default(cuid())
+  sourceId String
+  source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  text String
+  embedding Unsupported("vector")?
+}
+model AiRun {
+  id String @id @default(cuid())
+  conversationId String
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  question String
+  controlVersion Int
+  answer String?
+  sources Json
+  decision String
+  model String?
+  error String?
+  createdAt DateTime @default(now())
+  @@unique([conversationId, controlVersion])
+}
+model MetaSelection {
+  id String @id
+  userId String
+  pagesEncrypted String
+  expiresAt DateTime
+}
+model AuditLog {
+  id String @id @default(cuid())
+  userId String?
+  action String
+  target String
+  detail String?
+  createdAt DateTime @default(now())
+}
+model LoginAttempt {
+  key String @id
+  count Int @default(0)
+  expiresAt DateTime
+}
+model OAuthState {
+  id String @id
+  userId String
+  expiresAt DateTime
+}
