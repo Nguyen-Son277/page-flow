@@ -1,0 +1,72 @@
+# Mẫu cấu hình nginx cho PageFlow (production). Đây là MẪU, chưa được chạy thử trong
+# kho mã này — hãy đối chiếu với hạ tầng thật của bạn trước khi dùng.
+#
+# Nguyên tắc:
+#  - Ứng dụng tự đặt CSP và các header bảo mật (xem next.config.ts), nên proxy KHÔNG cần
+#    thêm lần nữa — tránh trùng header.
+#  - Chỉ proxy tới tiến trình web; worker chạy bằng process manager riêng, không qua nginx.
+#  - KHÔNG mở cổng PostgreSQL (5432) hay Redis (6379) ra ngoài.
+
+# Giới hạn tần suất theo IP ở tầng proxy (lớp phòng thủ thứ hai; ứng dụng đã có giới hạn
+# riêng trong mã nguồn — xem mục "Giới hạn tần suất và tài nguyên" trong README).
+limit_req_zone $binary_remote_addr zone=pageflow_login:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=pageflow_api:10m rate=300r/m;
+
+server {
+    listen 80;
+    server_name pageflow.example.com;
+    # Bắt buộc HTTPS: OAuth của Meta và cookie `secure` đều cần TLS.
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name pageflow.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/pageflow.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/pageflow.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Tệp tri thức tối đa 8 MB; ứng dụng chặn ở 9 MB nên proxy cho phép nhỉnh hơn một chút.
+    client_max_body_size 9m;
+
+    # QUAN TRỌNG: ghi đè X-Forwarded-For bằng địa chỉ thật của kết nối tới proxy.
+    # Nếu dùng $proxy_add_x_forwarded_for, client có thể tự gửi header giả và vượt qua
+    # giới hạn theo IP của ứng dụng.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+
+    # SSE (/api/events) phải không bị đệm và không bị cắt vì timeout.
+    location = /api/events {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        # Số kết nối SSE đồng thời còn bị giới hạn bởi SSE_MAX_CONNECTIONS trong ứng dụng.
+    }
+
+    location = /api/auth/login {
+        limit_req zone=pageflow_login burst=10 nodelay;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location = /api/auth/setup {
+        limit_req zone=pageflow_login burst=5 nodelay;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location /api/ {
+        limit_req zone=pageflow_api burst=60 nodelay;
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+    }
+}

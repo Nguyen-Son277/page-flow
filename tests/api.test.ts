@@ -39,6 +39,13 @@ describe.skipIf(!enabled)('authenticated API workflow', () => {
     const response = await bootstrap(); expect(response.status).toBe(200); const body = await response.text();
     expect(body).not.toContain('passwordHash'); expect(body).not.toContain('tokenEncrypted');
   });
+  it('hides colleague emails from agents', async () => {
+    const response = await bootstrap(); expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.user.email).toBe(`${prefix}@api.test`);
+    expect(body.members.length).toBeGreaterThan(0);
+    for (const member of body.members) expect(Object.keys(member)).not.toContain('email');
+  });
   it('enforces CSRF and admin-only settings', async () => {
     expect((await mutate(request('/api/conversations/x', { action: 'takeover' }, 'bad'), ctx())).status).toBe(403);
     expect((await settings(request('/api/settings', { action: 'create-user' }))).status).toBe(403);

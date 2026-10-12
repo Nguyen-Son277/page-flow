@@ -10,7 +10,7 @@ export async function answerQuestion(page: { id: string; tone: string; demo: boo
     const best = sources[0];
     const other = sources.find(s => s.title === best.title && s.id !== best.id && s.text !== best.text);
     if (other && /\d/.test(other.text) && /\d/.test(best.text)) return { answer: null, decision: 'NEEDS_HUMAN', sources };
-    return { answer: `${page.demo ? '[Demo • kiến thức đã duyệt]\\n' : ''}${best.text.slice(0, 1700)}`, decision: 'ANSWER', sources: [best] };
+    return { answer: `${page.demo ? '[Demo • kiến thức đã duyệt]\n' : ''}${best.text.slice(0, 1700)}`, decision: 'ANSWER', sources: [best] };
   }
   if (page.demo && !process.env.AI_API_KEY) {
     return { answer: `[Demo • trích nguyên văn kiến thức]\n${sources[0].text}`, decision: 'ANSWER', sources: [sources[0]] };

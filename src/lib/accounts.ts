@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import { db } from './db';
 import { HttpError } from './auth';
 import { hashPassword, verifyPassword } from './security';
+export { clearRateLimit, clientIp, enforceRateLimit, requestKey } from './rate-limit';
 
 export const USERNAME_PATTERN = /^[a-z][a-z0-9._-]{2,29}$/;
 export const USERNAME_RULE = 'Tên đăng nhập 3–30 ký tự, bắt đầu bằng chữ cái, chỉ gồm chữ thường, số, dấu chấm, gạch dưới hoặc gạch ngang.';
@@ -54,11 +54,16 @@ export async function createFirstAdmin(input: { name: string; email: string; use
 /** Admin-managed member creation; shared by the settings API so validation cannot drift. */
 export async function createMember(input: { name: string; email: string; username: string; password: string; role: 'ADMIN' | 'AGENT'; actorId: string }) {
   const email = assertEmail(input.email), username = assertUsernameShape(input.username), password = assertPassword(input.password);
-  if (await db.user.findUnique({ where: { email } })) throw new HttpError(409, 'Email đã được sử dụng');
-  await assertUsernameFree(username);
-  const user = await db.user.create({ data: { email, username, name: input.name.trim(), passwordHash: hashPassword(password), role: input.role } });
-  await db.auditLog.create({ data: { userId: input.actorId, action: 'user.create', target: user.id } });
-  return user;
+  return db.$transaction(async tx => {
+    // Serializes member creation so two administrators racing on the same username or
+    // e-mail get a clear 409 instead of a raw unique-constraint failure.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('pageflow-member-create'))`;
+    if (await tx.user.findUnique({ where: { email } })) throw new HttpError(409, 'Email đã được sử dụng');
+    if (await tx.user.findUnique({ where: { username } })) throw new HttpError(409, 'Tên đăng nhập đã được sử dụng');
+    const user = await tx.user.create({ data: { email, username, name: input.name.trim(), passwordHash: hashPassword(password), role: input.role } });
+    await tx.auditLog.create({ data: { userId: input.actorId, action: 'user.create', target: user.id } });
+    return user;
+  }, { maxWait: 30000, timeout: 30000 });
 }
 
 /** Keeps the current session, signs out every other device. */
@@ -87,9 +92,18 @@ export async function updateOwnProfile(userId: string, input: { name?: string; u
     data.username = username;
   }
   if (!Object.keys(data).length) throw new HttpError(400, 'Không có thay đổi nào');
-  const user = await db.user.update({ where: { id: userId }, data });
-  await db.auditLog.create({ data: { userId, action: 'profile.update', target: userId } });
-  return user;
+  return db.$transaction(async tx => {
+    // Same lock as member creation: a username changed concurrently by two people must
+    // fail with 409, not with a unique-constraint 500.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('pageflow-member-create'))`;
+    if (data.username) {
+      const taken = await tx.user.findUnique({ where: { username: data.username } });
+      if (taken && taken.id !== userId) throw new HttpError(409, 'Tên đăng nhập đã được sử dụng');
+    }
+    const user = await tx.user.update({ where: { id: userId }, data });
+    await tx.auditLog.create({ data: { userId, action: 'profile.update', target: userId } });
+    return user;
+  }, { maxWait: 30000, timeout: 30000 });
 }
 
 export async function resetMemberPassword(actorId: string, memberId: string, password: string) {
@@ -106,34 +120,16 @@ export async function resetMemberPassword(actorId: string, memberId: string, pas
 
 export async function deleteMember(actorId: string, memberId: string) {
   if (actorId === memberId) throw new HttpError(400, 'Không thể xóa tài khoản đang đăng nhập');
-  const member = await db.user.findUnique({ where: { id: memberId } });
-  if (!member) throw new HttpError(404, 'Không tìm thấy thành viên');
-  if (member.role === 'ADMIN' && await db.user.count({ where: { role: 'ADMIN' } }) <= 1) throw new HttpError(400, 'Không thể xóa quản trị viên cuối cùng');
-  await db.$transaction([
-    db.conversation.updateMany({ where: { assignedTo: memberId }, data: { assignedTo: null } }),
-    db.user.delete({ where: { id: memberId } }),
-    db.auditLog.create({ data: { userId: actorId, action: 'user.delete', target: memberId } })
-  ]);
+  return db.$transaction(async tx => {
+    // The last-admin check and the delete share one lock: otherwise two administrators
+    // deleting each other at the same time could leave the system with no admin at all.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('pageflow-admin-guard'))`;
+    const member = await tx.user.findUnique({ where: { id: memberId } });
+    if (!member) throw new HttpError(404, 'Không tìm thấy thành viên');
+    if (member.role === 'ADMIN' && await tx.user.count({ where: { role: 'ADMIN' } }) <= 1) throw new HttpError(400, 'Không thể xóa quản trị viên cuối cùng');
+    await tx.conversation.updateMany({ where: { assignedTo: memberId }, data: { assignedTo: null } });
+    await tx.user.delete({ where: { id: memberId } });
+    await tx.auditLog.create({ data: { userId: actorId, action: 'user.delete', target: memberId } });
+  }, { maxWait: 30000, timeout: 30000 });
 }
 
-/** Simple durable throttle reused by login and first-run setup. */
-export async function enforceRateLimit(key: string, limit: number, windowMs: number, message: string) {
-  const id = createHash('sha256').update(key).digest('hex');
-  const now = new Date();
-  return db.$transaction(async tx => {
-    const attempt = await tx.loginAttempt.findUnique({ where: { key: id } });
-    if (attempt && attempt.expiresAt > now) {
-      if (attempt.count >= limit) throw new HttpError(429, message);
-      await tx.loginAttempt.update({ where: { key: id }, data: { count: { increment: 1 } } });
-    } else {
-      await tx.loginAttempt.upsert({ where: { key: id }, create: { key: id, count: 1, expiresAt: new Date(now.getTime() + windowMs) }, update: { count: 1, expiresAt: new Date(now.getTime() + windowMs) } });
-    }
-  });
-}
-export async function clearRateLimit(key: string) {
-  await db.loginAttempt.deleteMany({ where: { key: createHash('sha256').update(key).digest('hex') } });
-}
-export function requestKey(req: Request, scope: string) {
-  const forwarded = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  return `${scope}:${forwarded || 'local'}`;
-}

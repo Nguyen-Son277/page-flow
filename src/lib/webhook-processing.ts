@@ -8,6 +8,37 @@ const eventSchema = z.object({
   postback: z.object({ mid: z.string().optional(), title: z.string().optional(), payload: z.string().optional() }).optional(),
   delivery: z.object({ mids: z.array(z.string()).optional() }).optional(), read: z.object({ watermark: z.number().optional() }).optional()
 }).passthrough();
+// A delivery/read receipt can arrive before phase 2 of processOutbound commits metaId/sentAt,
+// so these helpers are applied both inline (fast path) and later from the pending queue (retry path).
+export async function applyDelivery(pageId: string, mids: string[]): Promise<number> {
+  const updated = await db.message.updateMany({ where: { metaId: { in: mids }, conversation: { pageId }, state: 'SENT' }, data: { state: 'DELIVERED' } });
+  return updated.count;
+}
+export async function applyRead(pageId: string, psid: string, watermark: Date): Promise<number> {
+  const updated = await db.message.updateMany({ where: { conversation: { pageId, psid }, role: { in: ['AI', 'HUMAN'] }, state: { in: ['SENT', 'DELIVERED'] }, sentAt: { lte: watermark } }, data: { state: 'READ' } });
+  return updated.count;
+}
+// Re-apply receipts that matched nothing when they first arrived. A receipt is only deleted
+// once it actually changes a row, so an early receipt survives until its message is sent.
+export async function applyPendingReceipts(pageId: string, limit = 50): Promise<number> {
+  const receipts = await db.pendingReceipt.findMany({ where: { pageId }, orderBy: { createdAt: 'asc' }, take: limit });
+  let applied = 0;
+  for (const receipt of receipts) {
+    try {
+      const count = receipt.kind === 'READ'
+        ? (receipt.psid && receipt.watermark ? await applyRead(pageId, receipt.psid, receipt.watermark) : 0)
+        : await applyDelivery(pageId, receipt.metaIds);
+      if (count > 0) { await db.pendingReceipt.deleteMany({ where: { id: receipt.id } }); applied += 1; }
+    } catch (error) { console.error('Pending receipt:', error instanceof Error ? error.name : 'Unknown'); }
+  }
+  return applied;
+}
+// Receipts that stayed unmatched past the retention window can no longer be applied.
+export async function prunePendingReceipts(retentionDays = 7): Promise<number> {
+  const cutoff = new Date(Date.now() - retentionDays * 86400000);
+  const pruned = await db.pendingReceipt.deleteMany({ where: { createdAt: { lt: cutoff } } });
+  return pruned.count;
+}
 export async function processWebhook(payload: unknown) {
   const body = payload as { entry?: { id: string; messaging?: unknown[] }[] };
   for (const entry of body.entry || []) {
@@ -19,11 +50,24 @@ export async function processWebhook(payload: unknown) {
       if (!parsed.success) continue;
       const e = parsed.data;
       if (e.delivery?.mids) {
-        await db.message.updateMany({ where: { metaId: { in: e.delivery.mids }, conversation: { pageId: page.id }, state: 'SENT' }, data: { state: 'DELIVERED' } });
+        const mids = e.delivery.mids;
+        const delivered = await applyDelivery(page.id, mids);
+        // Nothing matched yet: the send may not have committed metaId. Park the receipt so
+        // the worker can apply it once the message exists. An empty mids list is not parked.
+        if (!delivered && mids.length) {
+          const key = `DELIVERY:${page.id}:${[...mids].sort().join(',')}`;
+          await db.pendingReceipt.upsert({ where: { key }, create: { pageId: page.id, key, kind: 'DELIVERY', metaIds: mids }, update: {} });
+        }
         await notify(page.id).catch(() => {}); continue;
       }
       if (e.read?.watermark && e.sender) {
-        await db.message.updateMany({ where: { conversation: { pageId: page.id, psid: e.sender.id }, role: { in: ['AI', 'HUMAN'] }, state: { in: ['SENT', 'DELIVERED'] }, sentAt: { lte: new Date(e.read.watermark) } }, data: { state: 'READ' } });
+        const watermark = new Date(e.read.watermark);
+        const read = await applyRead(page.id, e.sender.id, watermark);
+        // A read receipt with no sent message yet is parked; the same delivery-time race.
+        if (!read) {
+          const key = `READ:${page.id}:${e.sender.id}:${watermark.toISOString()}`;
+          await db.pendingReceipt.upsert({ where: { key }, create: { pageId: page.id, key, kind: 'READ', psid: e.sender.id, watermark }, update: {} });
+        }
         await notify(page.id).catch(() => {}); continue;
       }
       if (!e.message && !e.postback) continue;

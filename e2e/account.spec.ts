@@ -43,6 +43,8 @@ test('create-style login by short username, then change username and password', 
   await page.screenshot({ path: 'artifacts/account-panel.png', fullPage: true });
   // Sign out, then the old credentials must fail and the new username must work.
   await page.getByRole('button', { name: 'Đăng xuất', exact: true }).first().click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Đăng xuất', exact: true }).click();
   await page.waitForURL('**/login');
   await page.getByLabel('Mật khẩu', { exact: true }).fill(START_PASSWORD);
   await page.getByLabel('Email hoặc tên đăng nhập').fill(fixture);

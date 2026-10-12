@@ -38,9 +38,12 @@ model Page {
   tokenEncrypted String?
   lastError String?
   lastWebhookAt DateTime?
+  // Last time the worker verified the Page token against Graph; nil means "never checked".
+  tokenCheckedAt DateTime?
   members PageMember[]
   conversations Conversation[]
   sources KnowledgeSource[]
+  pendingReceipts PendingReceipt[]
   createdAt DateTime @default(now())
 }
 model PageMember {
@@ -104,6 +107,9 @@ model WebhookEvent {
   attempts Int @default(0)
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
+  // The worker polls this table once per second; without the index the poll degrades
+  // to a sequential scan as soon as delivery history grows.
+  @@index([state, createdAt])
 }
 model OutboundJob {
   id String @id @default(cuid())
@@ -119,6 +125,8 @@ model OutboundJob {
   error String?
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
+  // The send worker polls `state` + `nextAt` once per second.
+  @@index([state, nextAt])
 }
 model KnowledgeSource {
   id String @id @default(cuid())
@@ -151,7 +159,8 @@ model KnowledgeChunk {
   sourceId String
   source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   text String
-  embedding Unsupported("vector")?
+  // Dimension is pinned so the HNSW index created by migration can exist; see README.
+  embedding Unsupported("vector(1536)")?
 }
 model AiRun {
   id String @id @default(cuid())
@@ -190,4 +199,19 @@ model OAuthState {
   id String @id
   userId String
   expiresAt DateTime
+}
+// A delivery/read receipt that arrived before the outbound message stored its Meta id or
+// sent time. It is replayed once the message row can match, then deleted; `key` keeps a
+// repeated receipt from creating a second row.
+model PendingReceipt {
+  id String @id @default(cuid())
+  pageId String
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  key String @unique
+  kind String
+  metaIds String[]
+  psid String?
+  watermark DateTime?
+  createdAt DateTime @default(now())
+  @@index([pageId, createdAt])
 }

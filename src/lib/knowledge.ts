@@ -2,6 +2,16 @@ import { db } from './db';
 import { lockPage } from './locking';
 import { randomUUID } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
+// The embedding column is pinned to 1536 dimensions because the HNSW index needs
+// an explicit dimension count. Switching to another size requires a migration that
+// alters the column type, followed by `pnpm db:reindex`.
+export const VECTOR_DIMENSIONS = 1536;
+// Fail fast when AI_EMBEDDING_DIMENSIONS disagrees with the fixed column width, so
+// we never send mismatched vectors to PostgreSQL or query a wrongly sized index.
+export function assertVectorDimensions() {
+  const configured = Number(process.env.AI_EMBEDDING_DIMENSIONS || VECTOR_DIMENSIONS);
+  if (configured !== VECTOR_DIMENSIONS) throw new Error('Cột vector cố định 1536 chiều. Đặt AI_EMBEDDING_DIMENSIONS=1536 hoặc đổi kiểu cột bằng migration rồi chạy pnpm db:reindex.');
+}
 export function splitChunks(text: string, size = 1000) {
   const parts: string[] = [];
   for (let i = 0; i < text.length; i += size - 150) parts.push(text.slice(i, i + size));
@@ -18,9 +28,11 @@ export async function aiRequest(path: string, body: unknown) {
 }
 export async function embed(texts: string[]): Promise<number[][] | null> {
   if (!process.env.AI_API_KEY || !process.env.AI_EMBEDDING_MODEL) return null;
-  const r = await aiRequest('embeddings', { model: process.env.AI_EMBEDDING_MODEL, input: texts, dimensions: Number(process.env.AI_EMBEDDING_DIMENSIONS || 1536) });
+  // Check before paying for an API call whose vectors could not be stored.
+  assertVectorDimensions();
+  const r = await aiRequest('embeddings', { model: process.env.AI_EMBEDDING_MODEL, input: texts, dimensions: VECTOR_DIMENSIONS });
   const values = r.data?.sort((a: { index: number }, b: { index: number }) => a.index - b.index).map((x: { embedding: number[] }) => x.embedding);
-  if (!Array.isArray(values) || values.length !== texts.length || values.some(v => !Array.isArray(v) || v.length !== Number(process.env.AI_EMBEDDING_DIMENSIONS || 1536) || !v.every(Number.isFinite))) throw new Error('Embedding không hợp lệ');
+  if (!Array.isArray(values) || values.length !== texts.length || values.some(v => !Array.isArray(v) || v.length !== VECTOR_DIMENSIONS || !v.every(Number.isFinite))) throw new Error('Embedding không hợp lệ');
   return values;
 }
 export function embeddingConfig() { return process.env.AI_EMBEDDING_MODEL && process.env.AI_API_KEY ? `${process.env.AI_BASE_URL || 'https://api.openai.com/v1'}|${process.env.AI_EMBEDDING_MODEL}|${process.env.AI_EMBEDDING_DIMENSIONS || '1536'}` : 'lexical-v1'; }
@@ -52,6 +64,9 @@ export function lexicalScore(question: string, text: string) {
 }
 export async function retrieve(pageId: string, question: string): Promise<Evidence[]> {
   const config = embeddingConfig();
+  // With a real embedding backend enabled a dimension mismatch must surface as
+  // NEEDS_HUMAN instead of searching an index built for another vector size.
+  if (config !== 'lexical-v1') assertVectorDimensions();
   if (config !== 'lexical-v1' && await db.knowledgeSource.count({ where: { pageId, publishedAt: { not: null }, OR: [{ embeddingConfig: { not: config } }, { embeddingConfig: null }] } })) throw new Error('Cấu hình embedding đã đổi. Xuất bản lại nguồn để lập chỉ mục.');
   const vectors = await embed([question]);
   if (vectors) {

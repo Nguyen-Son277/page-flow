@@ -36,7 +36,7 @@ export async function POST(req: Request) {
         const r = await fetch(graphUrl(`${p.id}/subscribed_apps`), { method: 'POST', headers: { Authorization: `Bearer ${p.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ subscribed_fields: ['messages', 'messaging_postbacks', 'message_deliveries', 'message_reads'] }), signal: AbortSignal.timeout(15000) });
         const data = await r.json(); connected = r.ok && data.success === true;
       } catch {}
-      await db.page.updateMany({ where: { id: page.id, knowledgeRevision: page.knowledgeRevision }, data: { connection: connected ? 'CONNECTED' : 'ERROR', lastError: connected ? null : 'Không đăng ký được webhook. Kiểm tra quyền App và kết nối lại.' } });
+      await db.page.updateMany({ where: { id: page.id, knowledgeRevision: page.knowledgeRevision }, data: connected ? { connection: 'CONNECTED', lastError: null, tokenCheckedAt: null } : { connection: 'ERROR', lastError: 'Không đăng ký được webhook. Kiểm tra quyền App và kết nối lại.' } });
       await audit(user.id, 'meta.connect', page.id); results.push({ id: page.id, connected });
     }
     return Response.json({ ok: true, results });

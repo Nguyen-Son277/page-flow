@@ -4,6 +4,8 @@ import { requireUser, requirePage, errorResponse, HttpError, audit } from '@/lib
 import { lockConversation } from '@/lib/locking';
 import { notify, scheduleAi } from '@/lib/queue';
 import { allowedToSend } from '@/lib/security';
+import { waitForAiSends } from '@/lib/outbound';
+import { enforceRateLimit, limitFromEnv } from '@/lib/rate-limit';
 type Context = { params: Promise<{ id: string }> };
 async function access(id: string, user: { id: string; role: string }) {
   const c = await db.conversation.findUnique({ where: { id } });
@@ -30,6 +32,8 @@ export async function POST(req: Request, ctx: Context) {
       const target = await db.user.findUnique({ where: { id: body.assignedTo }, include: { memberships: true } });
       if (!target || (target.role !== 'ADMIN' && !target.memberships.some(m => m.pageId === page.id))) throw new HttpError(400, 'Nhân viên không có quyền Page này');
     }
+    // A single agent could otherwise flood a customer inside the 24-hour window.
+    if (body.action === 'message') await enforceRateLimit(`send:${user.id}`, limitFromEnv('SEND_RATE_LIMIT', 60), 300000, 'Bạn đã gửi quá nhiều tin trong thời gian ngắn. Vui lòng đợi vài phút.');
     const result = await db.$transaction(async tx => {
       await lockConversation(tx, id);
       const current = await tx.conversation.findUniqueOrThrow({ where: { id } });
@@ -57,6 +61,9 @@ export async function POST(req: Request, ctx: Context) {
       return updated;
     }, { maxWait: 30000, timeout: 30000 });
     if (body.action !== 'read') await audit(user.id, body.action, id);
+    // A takeover reply from Meta can no longer be recalled, so wait for any AI turn that
+    // is already in flight before confirming that the human is in control.
+    if (body.action === 'takeover') await waitForAiSends(id);
     await notify(c.pageId).catch(() => {});
     if (['resume', 'demo-incoming'].includes(body.action) && result.status === 'AI_ACTIVE') await scheduleAi(id, result.version).catch(() => {});
     return Response.json({ ok: true });

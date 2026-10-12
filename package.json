@@ -10,6 +10,7 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
     "db:dev": "prisma migrate dev",
+    "db:reindex": "tsx scripts/reindex.ts",
     "admin:create": "tsx scripts/admin.ts", "admin:reset": "tsx scripts/admin.ts --reset",
     "demo:seed": "tsx scripts/seed.ts",
     "test": "vitest run",

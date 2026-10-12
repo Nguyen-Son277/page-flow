@@ -1,9 +1,10 @@
 import { Worker } from 'bullmq';
 import { db } from './lib/db';
 import { getRedis, scheduleAi } from './lib/queue';
-import { processWebhook } from './lib/webhook-processing';
+import { processWebhook, applyPendingReceipts, prunePendingReceipts } from './lib/webhook-processing';
 import { processAi } from './lib/ai-processing';
 import { processOutbound } from './lib/outbound';
+import { checkPageTokens } from './lib/page-health';
 const worker = new Worker('pageflow-ai', async job => processAi(job.data.conversationId, job.data.version), { connection: getRedis(), concurrency: 4 });
 worker.on('failed', (_job, error) => console.error('AI worker:', error.name));
 let stopping = false;
@@ -26,6 +27,14 @@ async function sweep() {
   await db.oAuthState.deleteMany({ where: { expiresAt: { lt: new Date() } } });
   await db.loginAttempt.deleteMany({ where: { expiresAt: { lt: new Date() } } });
   await db.metaSelection.deleteMany({ where: { expiresAt: { lt: new Date() } } });
+  // Token health runs on every sweep, independently of the opt-in retention block below.
+  // A failure inside the check must never break the sweep itself.
+  await checkPageTokens().catch(() => {});
+  // Receipts parked before their message had metaId/sentAt are retried here; bounded so a
+  // large backlog cannot starve the rest of the sweep. One bad Page must not break the sweep.
+  const receiptPages = await db.pendingReceipt.findMany({ distinct: ['pageId'], select: { pageId: true }, take: 20 });
+  for (const { pageId } of receiptPages) await applyPendingReceipts(pageId).catch(() => {});
+  await prunePendingReceipts().catch(() => {});
   // Retention is opt-in. Never delete open conversations or pending sends.
   if (!Number.isFinite(retentionDays) || retentionDays < 7) return;
   await db.conversation.deleteMany({ where: { lastMessageAt: { lt: cutoff }, resolved: true, outbound: { none: { state: { in: ['PENDING', 'SENDING', 'UNCERTAIN'] } } } } });

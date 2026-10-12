@@ -2,9 +2,10 @@
 
 import { AlertCircle, Inbox, LoaderCircle, X } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { conversationStatusLabel } from './labels';
 
 export type User = { id: string; name: string; email: string; role: string; csrf: string };
-export type Member = { id: string; name: string; email: string; username?: string | null; role: string; pageIds?: string[]; pages?: { id?: string; pageId?: string }[]; memberships?: { pageId: string }[] };
+export type Member = { id: string; name: string; email?: string; username?: string | null; role: string; pageIds?: string[]; pages?: { id?: string; pageId?: string }[]; memberships?: { pageId: string }[] };
 export type Page = { id: string; name: string; category: string; color: string; demo: boolean; aiEnabled: boolean; connection: string; lastError?: string | null; tone?: string };
 export type Conversation = { id: string; pageId: string; customerName: string; status: string; assignedTo?: string | null; resolved: boolean; lastCustomerAt?: string | null; lastIncomingAt?: string | null; lastMessageAt: string; preview: string; unread: boolean | number; page: { name: string; color: string; demo: boolean } };
 export type Message = { id: string; role: 'CUSTOMER' | 'AI' | 'HUMAN' | 'NOTE'; text: string; state: string; error?: string | null; createdAt: string; receivedAt?: string | null; attachments?: unknown };
@@ -45,10 +46,10 @@ export function relativeTime(value?: string | null) {
 export function fullTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('vi', { dateStyle: 'medium', timeStyle: 'short' }).format(date); }
 export const initials = (name: string) => name.trim().split(/\s+/).slice(-2).map(s => s[0]).join('').toUpperCase() || '?';
 export function StatusBadge({ status, resolved }: { status: string; resolved?: boolean }) {
-  const label = resolved ? 'Đã xử lý' : status === 'NEEDS_HUMAN' ? 'Cần hỗ trợ' : status.includes('HUMAN') ? 'Nhân viên' : status === 'AI_ACTIVE' ? 'AI đang hỗ trợ' : status;
+  const label = conversationStatusLabel(status, resolved);
   return <span className={`badge ${resolved ? 'neutral' : status === 'NEEDS_HUMAN' ? 'amber' : status.includes('HUMAN') ? 'indigo' : 'teal'}`}>{label}</span>;
 }
-export function Empty({ title, description, children }: { title: string; description?: string; children?: ReactNode }) { return <div className="empty-state"><span className="empty-icon"><Inbox size={28} /></span><h3>{title}</h3>{description && <p>{description}</p>}{children}</div>; }
+export function Empty({ title, description, children, icon }: { title: string; description?: string; children?: ReactNode; icon?: ReactNode }) { return <div className="empty-state"><span className="empty-icon">{icon ?? <Inbox size={28} />}</span><h3>{title}</h3>{description && <p>{description}</p>}{children}</div>; }
 export function Loading({ label = 'Đang tải dữ liệu…' }: { label?: string }) { return <div className="loading-state" role="status"><LoaderCircle className="spin" size={23} /><span>{label}</span></div>; }
 export function Alert({ message, onClose, kind = 'error' }: { message: string; onClose?: () => void; kind?: 'error' | 'success' | 'warning' }) { return <div className={`alert ${kind}`} role={kind === 'error' ? 'alert' : 'status'}><AlertCircle size={17} /><span>{message}</span>{onClose && <button className="icon-button" onClick={onClose} aria-label="Đóng thông báo"><X size={16} /></button>}</div>; }
 export function sourcesOf(value: unknown): SourceRef[] { if (!Array.isArray(value)) return []; return value.map(item => typeof item === 'string' ? { title: item } : item && typeof item === 'object' ? item as SourceRef : {}).filter(item => item.title || item.id || item.text); }

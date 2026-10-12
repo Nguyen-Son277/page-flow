@@ -16,6 +16,27 @@ services:
     ports: ["127.0.0.1:6379:6379"]
     command: redis-server --appendonly yes
     volumes: ["redis_data:/data"]
+  # Chỉ dùng cho kiểm thử, tách hoàn toàn khỏi dữ liệu dev. Khởi động bằng:
+  #   docker compose --profile test up -d
+  # Dữ liệu đặt trên tmpfs nên mỗi lần tạo lại là một cơ sở dữ liệu trắng — đúng ý đồ
+  # "chỉ chạy test trên DB dùng-một-lần", vì ca setup xóa toàn bộ tài khoản.
+  postgres-test:
+    profiles: ["test"]
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: pageflow
+      POSTGRES_PASSWORD: pageflow
+      POSTGRES_DB: pageflow
+    ports: ["127.0.0.1:55432:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pageflow"]
+      interval: 5s
+      retries: 10
+  redis-test:
+    profiles: ["test"]
+    image: redis:7-alpine
+    ports: ["127.0.0.1:56379:6379"]
 volumes:
   postgres_data:
   redis_data:
