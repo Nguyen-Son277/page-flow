@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { AlertCircle, ArrowLeft, ArrowUpRight, Bell, BookOpen, Bot, Check, CheckCheck, CircleHelp, Command, FileText, Filter, Globe, Inbox, Layers3, LogOut, MessageCircle, MoreHorizontal, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Sparkles, StickyNote, UserRound, Users, WandSparkles, X } from 'lucide-react';
+import { useNavigationLayout } from './navigation';
+import { AlertCircle, ArrowLeft, ArrowUpRight, Bell, BookOpen, Bot, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Command, FileText, Filter, Globe, Inbox, Layers3, LogOut, MessageCircle, MoreHorizontal, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, Sparkles, StickyNote, UserRound, Users, WandSparkles, X } from 'lucide-react';
 import { AccountPanel, KnowledgePanel, Modal, PagesPanel, SettingsPanel } from './workspace-panels';
 import { decisionLabel, messageStateLabel } from './labels';
 import { ThemeToggle } from './theme';
@@ -14,6 +15,7 @@ const nav: { id: Tab; label: string; icon: typeof Inbox }[] = [{ id: 'inbox', la
 
 export function Workspace({ user }: { user: User }) {
   const [tab, setTab] = useState<Tab>('inbox');
+  const [inboxExpanded, setInboxExpanded] = useState(true);
   const [data, setData] = useState<Bootstrap | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState('');
@@ -33,7 +35,17 @@ export function Workspace({ user }: { user: User }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState('');
   const [live, setLive] = useState<'connecting' | 'connected' | 'offline'>('connecting');
-  const [sideOpen, setSideOpen] = useState(false);
+  const [showAiTip, setShowAiTip] = useState(true);
+  const navigation = useNavigationLayout();
+  const sidebarRef = useRef<HTMLElement>(null);
+  const railToggleRef = useRef<HTMLButtonElement>(null);
+  const topbarToggleRef = useRef<HTMLButtonElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const openNavigation = () => navigation.open();
+  const closeNavigation = () => {
+    navigation.close();
+    if (!navigation.mobile) requestAnimationFrame(() => railToggleRef.current?.focus());
+  };
   const [confirmResume, setConfirmResume] = useState(false);
   const [confirmLogout, setConfirmLogout] = useState(false);
   const messageEnd = useRef<HTMLDivElement>(null);
@@ -214,47 +226,100 @@ export function Workspace({ user }: { user: User }) {
   }
   async function logout() { setBusy('logout'); try { await post('/api/auth/logout', {}, csrf); window.location.assign('/login'); } catch (err) { setError(errorText(err)); setBusy(''); } }
   async function refresh() { setBusy('refresh'); try { await Promise.all([loadBootstrap(), loadList(true), ...(selectedId ? [loadDetail(selectedId, true)] : [])]); } catch (err) { setError(errorText(err)); } finally { setBusy(''); } }
+  useEffect(() => {
+    if (!navigation.mobile || !navigation.drawerOpen) return;
+    const main = mainRef.current, drawer = sidebarRef.current;
+    if (!drawer) return;
+    const previous = document.activeElement as HTMLElement | null;
+    if (main) main.inert = true;
+    const focusable = () => Array.from(drawer.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), [tabindex="0"]')).filter(el => el.getClientRects().length > 0);
+    (focusable()[0] || drawer).focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); navigation.close(); }
+      if (event.key !== 'Tab') return;
+      const items = focusable(), first = items[0], last = items.at(-1);
+      if (!first || !last) { event.preventDefault(); drawer.focus(); return; }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === drawer)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      if (main) main.inert = false;
+      document.removeEventListener('keydown', onKey);
+      requestAnimationFrame(() => {
+        if (previous?.isConnected && previous.getClientRects().length) previous.focus();
+        else if (railToggleRef.current?.getClientRects().length) railToggleRef.current.focus();
+        else topbarToggleRef.current?.focus();
+      });
+    };
+  }, [navigation.mobile, navigation.drawerOpen, navigation.close]);
+
   const selectedPage = detail ? data?.pages.find(p => p.id === detail.pageId) : undefined;
   const human = detail?.status.includes('HUMAN') && detail.status !== 'NEEDS_HUMAN';
   const canSend = composerMode === 'note' || human;
   const currentPage = data?.pages.find(p => p.id === pageId);
-  const selectScope = (id: string) => { setPageId(id); setSelectedId(null); setSideOpen(false); };
-  const changeTab = (id: Tab) => { setTab(id); setSideOpen(false); };
+  const selectScope = (id: string) => { setPageId(id); setSelectedId(null); navigation.closeOnSelect(); };
+  const changeTab = (id: Tab) => {
+    setTab(id);
+    setInboxExpanded(id === 'inbox');
+    navigation.closeOnSelect();
+  };
+  const openInboxNavigation = () => {
+    setTab('inbox');
+    setInboxExpanded(true);
+    setFilter('all');
+    setSelectedId(null);
+    navigation.open();
+  };
+  const toggleInboxNavigation = () => {
+    if (tab !== 'inbox') { setTab('inbox'); setInboxExpanded(true); }
+    else setInboxExpanded(expanded => !expanded);
+  };
+  const selectInboxFilter = (id: FilterName) => {
+    setTab('inbox');
+    setInboxExpanded(true);
+    setFilter(id);
+    setSelectedId(null);
+    navigation.closeOnSelect();
+  };
 
-  return <div className="workspace">
-    <aside className="rail">
+  return <div className={`workspace ${navigation.sidebarVisible ? 'navigation-expanded' : 'navigation-collapsed'}`}>
+    <aside className="rail" aria-label="Điều hướng thu gọn" hidden={navigation.sidebarVisible}>
+      <button ref={railToggleRef} className="rail-item nav-expand" onClick={openNavigation} title="Mở rộng menu" aria-label="Mở rộng menu" aria-expanded={navigation.sidebarVisible} aria-controls="workspace-navigation"><ChevronRight size={22} /></button>
       <button className="rail-brand" aria-label="PageFlow, mở hộp thư" onClick={() => changeTab('inbox')}><Layers3 size={25} /></button>
 
-      <nav className="rail-nav" aria-label="Điều hướng nhanh">{navItems.map(item => <button key={item.id} className={`rail-item ${tab === item.id ? 'active' : ''}`} onClick={() => changeTab(item.id)} title={item.label} aria-label={item.label} aria-current={tab === item.id ? 'page' : undefined}><item.icon size={22} /><span>{item.label}</span>{item.id === 'inbox' && !!data?.stats.unread && <i />}</button>
+      <nav className="rail-nav" aria-label="Điều hướng nhanh">{navItems.map(item => <button key={item.id} className={`rail-item ${tab === item.id ? 'active' : ''}`} onClick={() => item.id === 'inbox' ? openInboxNavigation() : changeTab(item.id)} title={item.label} aria-label={item.label} aria-current={tab === item.id ? 'page' : undefined}><item.icon size={22} /><span>{item.label}</span>{item.id === 'inbox' && !!data?.stats.unread && <i />}</button>
 )}</nav>
       <div className="rail-bottom">{activeUser.role === 'ADMIN' && <button className="rail-item" title="Hướng dẫn thiết lập" aria-label="Hướng dẫn thiết lập" onClick={() => changeTab('settings')}><CircleHelp size={21} /></button>}
 <button className="rail-avatar" title={`${activeUser.name} · Đăng xuất`} aria-label="Đăng xuất" onClick={() => setConfirmLogout(true)} disabled={busy === 'logout'}>{initials(activeUser.name)}</button>
 </div>
     </aside>
-    <aside className={`workspace-sidebar ${sideOpen ? 'open' : ''}`}>
-      <div className="sidebar-brand">PageFlow<span>.</span><button className="icon-button mobile-only" aria-label="Đóng menu" onClick={() => setSideOpen(false)}><X size={18} /></button>
+    <aside ref={sidebarRef} id="workspace-navigation" className={`workspace-sidebar ${navigation.sidebarVisible ? 'open' : ''}`} hidden={!navigation.sidebarVisible} tabIndex={-1} aria-label="Menu điều hướng" role={navigation.mobile && navigation.drawerOpen ? 'dialog' : undefined} aria-modal={navigation.mobile && navigation.drawerOpen ? true : undefined}>
+      <div className="sidebar-header"><div className="sidebar-brand">PageFlow<span>.</span><button className="icon-button nav-collapse" aria-label="Thu gọn menu" title="Thu gọn menu" aria-expanded={navigation.sidebarVisible} aria-controls="workspace-navigation" onClick={closeNavigation}><ChevronLeft size={18} /></button>
 </div>
-      <div className="workspace-switch"><span className="workspace-logo"><Command size={19} /></span><div><strong>Không gian làm việc</strong><small>{activeUser.role === 'ADMIN' ? 'Quản trị viên' : 'Đội ngũ chăm sóc'}</small></div></div>
+      <div className="workspace-switch"><span className="workspace-logo"><Command size={19} /></span><div><strong>Không gian làm việc</strong><small>{activeUser.role === 'ADMIN' ? 'Quản trị viên' : 'Đội ngũ chăm sóc'}</small></div><ChevronDown size={15} /></div></div>
+      <div className="sidebar-scroll" aria-label="Danh sách điều hướng">
       <div className="sidebar-heading">KHÔNG GIAN CHUNG</div>
-      <nav className="sidebar-nav" aria-label="Không gian chung">{navItems.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => changeTab(item.id)} aria-current={tab === item.id ? 'page' : undefined}><item.icon size={18} /><span>{item.label}</span>{item.id === 'inbox' && !!data?.stats.unread && <b>{data.stats.unread}</b>}</button>
-)}</nav>
+      <nav className="sidebar-nav" aria-label="Không gian chung"><ul className="sidebar-menu">{navItems.map(item => <li key={item.id} className={item.id === 'inbox' ? 'inbox-menu-group' : undefined}>
+<button className={tab === item.id ? 'active' : ''} onClick={() => item.id === 'inbox' ? toggleInboxNavigation() : changeTab(item.id)} aria-current={tab === item.id ? 'page' : undefined} aria-expanded={item.id === 'inbox' ? inboxExpanded : undefined} aria-controls={item.id === 'inbox' ? 'inbox-submenu' : undefined}><item.icon size={18} /><span>{item.label}</span>{item.id === 'inbox' && <>{!!data?.stats.unread && <b>{data.stats.unread}</b>}<ChevronDown size={15} className={`inbox-chevron ${inboxExpanded ? 'expanded' : ''}`} /></>}</button>
+{item.id === 'inbox' && <ul id="inbox-submenu" className="filter-nav inbox-submenu" aria-label="Bộ lọc Hộp thư" hidden={!inboxExpanded}>{filters.map(child => <li key={child.id}><button className={tab === 'inbox' && filter === child.id ? 'active' : ''} aria-current={tab === 'inbox' && filter === child.id ? 'page' : undefined} onClick={() => selectInboxFilter(child.id)}><child.icon size={15} /><span>{child.label}</span>{child.id === 'unread' && !!data?.stats.unread && <b>{data.stats.unread}</b>}{child.id === 'needsHuman' && !!data?.stats.needsHuman && <b className="amber-count">{data.stats.needsHuman}</b>}</button></li>)}</ul>}
+</li>)}</ul></nav>
       <div className="sidebar-divider" />
-      {tab === 'inbox' && <><div className="sidebar-heading">HỘI THOẠI <Filter size={13} /></div><nav className="filter-nav" aria-label="Bộ lọc hội thoại">{filters.map(item => <button key={item.id} className={filter === item.id ? 'active' : ''} onClick={() => { setFilter(item.id); setSelectedId(null); setSideOpen(false); }} aria-current={filter === item.id ? 'true' : undefined}><item.icon size={17} /><span>{item.label}</span>{item.id === 'unread' && !!data?.stats.unread && <b>{data.stats.unread}</b>}{item.id === 'needsHuman' && !!data?.stats.needsHuman && <b className="amber-count">{data.stats.needsHuman}</b>}</button>
-)}</nav></>}
       <div className="sidebar-heading">FACEBOOK PAGES <button className="icon-button" aria-label="Quản lý Pages" onClick={() => changeTab('pages')}><Plus size={15} /></button>
 </div>
       <nav className="page-nav" aria-label="Facebook Pages"><button className={!pageId ? 'active' : ''} onClick={() => selectScope('')} aria-current={!pageId ? 'true' : undefined}><Globe size={17} /><span>Tất cả Pages</span><small>{data?.pages.length ?? '—'}</small></button>
 {data?.pages.map(page => <button key={page.id} className={pageId === page.id ? 'active' : ''} onClick={() => selectScope(page.id)} aria-current={pageId === page.id ? 'true' : undefined}><span className="page-dot" style={{ background: page.color }} /><span>{page.name}</span>{page.demo ? <small className="demo-mini">DEMO</small> : <span className={`connection-dot ${page.connection === 'CONNECTED' ? 'ok' : ''}`} title={page.connection === 'CONNECTED' ? 'Đã kết nối' : 'Chưa kết nối'} />}</button>
 )}</nav>
-      <div className="sidebar-bottom"><div className="ai-tip"><span><Sparkles size={17} /> AI có trách nhiệm</span><p>Chỉ dùng tri thức đã xuất bản. Chuyển nhân viên khi cần hỗ trợ.</p>
+      {showAiTip && <div className="sidebar-ai-tip-wrap"><button type="button" className="ai-tip-dismiss" aria-label="Ẩn mẹo AI trong phiên đăng nhập này" title="Ẩn trong phiên này" onClick={() => setShowAiTip(false)}><X size={15} /></button><div className="ai-tip"><span><Sparkles size={17} /> AI có trách nhiệm</span><p>Chỉ dùng tri thức đã xuất bản. Chuyển nhân viên khi cần hỗ trợ.</p>
 <button onClick={() => changeTab('knowledge')}>Quản lý tri thức <ArrowUpRight size={14} /></button>
-</div><div className="sidebar-user"><span className="avatar small indigo">{initials(activeUser.name)}</span><div><strong>{activeUser.name}</strong><small>{activeUser.email}</small></div><button className="icon-button" title="Đăng xuất" aria-label="Đăng xuất" disabled={busy === 'logout'} onClick={() => setConfirmLogout(true)}><LogOut size={16} /></button>
-</div></div>
+</div></div>}</div>
+      <div className="sidebar-user"><span className="avatar small indigo">{initials(activeUser.name)}</span><div><strong>{activeUser.name}</strong><small>{activeUser.email}</small></div><button className="icon-button logout-button" title="Đăng xuất" aria-label="Đăng xuất" disabled={busy === 'logout'} onClick={() => setConfirmLogout(true)}><LogOut size={16} /></button>
+</div>
     </aside>
-    {sideOpen && <button className="sidebar-overlay" onClick={() => setSideOpen(false)} aria-label="Đóng menu" />}
-    <main className="main-workspace">
-      <header className="topbar"><div><button className="icon-button mobile-only" onClick={() => setSideOpen(true)} aria-label="Mở menu"><Layers3 size={21} /></button>
-<span className="breadcrumb">Không gian làm việc</span><span className="breadcrumb-divider">/</span><strong>{nav.find(item => item.id === tab)?.label}</strong></div><div className="topbar-actions">{notificationPermission === 'default' && <button className="button secondary compact notification-action" onClick={() => void enableNotifications()} title="Bật thông báo trình duyệt cho tin nhắn mới"><Bell size={15} /><span>Bật thông báo</span></button>}<span className={`live-status ${live}`} title="Trạng thái kênh cập nhật sự kiện"><i />{live === 'connected' ? 'Đang cập nhật trực tiếp' : live === 'offline' ? 'Cập nhật dự phòng mỗi 15 giây' : 'Đang kết nối'}</span><ThemeToggle /><button className="icon-button" disabled={busy === 'refresh'} title="Làm mới dữ liệu" aria-label="Làm mới dữ liệu" onClick={refresh}><RefreshCw size={17} className={busy === 'refresh' ? 'spin' : ''} /></button>
+    {navigation.mobile && navigation.drawerOpen && <button className="sidebar-overlay" onClick={closeNavigation} aria-label="Đóng menu" tabIndex={-1} />}
+    <main ref={mainRef} className="main-workspace">
+      <header className="topbar"><div><button ref={topbarToggleRef} className="icon-button mobile-only" onClick={openNavigation} aria-label="Mở menu" aria-expanded={navigation.sidebarVisible} aria-controls="workspace-navigation"><Layers3 size={21} /></button>
+<span className="breadcrumb">Work Space</span><span className="breadcrumb-divider">/</span><strong>{nav.find(item => item.id === tab)?.label}</strong></div><div className="topbar-actions">{notificationPermission === 'default' && <button className="button secondary compact notification-action" onClick={() => void enableNotifications()} title="Bật thông báo trình duyệt cho tin nhắn mới"><Bell size={15} /><span>Bật thông báo</span></button>}<span className={`live-status ${live}`} title="Trạng thái kênh cập nhật sự kiện"><i />{live === 'connected' ? 'Đang cập nhật trực tiếp' : live === 'offline' ? 'Cập nhật dự phòng mỗi 15 giây' : 'Đang kết nối'}</span><ThemeToggle /><button className="icon-button" disabled={busy === 'refresh'} title="Làm mới dữ liệu" aria-label="Làm mới dữ liệu" onClick={refresh}><RefreshCw size={17} className={busy === 'refresh' ? 'spin' : ''} /></button>
 <span className="avatar small indigo">{initials(activeUser.name)}</span></div></header>
       {error && <div className="global-alert"><Alert message={error} onClose={() => setError('')} /><button className="text-button" onClick={() => { setInitialLoading(true); loadBootstrap().then(result => { setConversations(result.conversations); listCount.current = result.conversations.length; setError(''); }).catch(err => setError(errorText(err))).finally(() => setInitialLoading(false)); }}>Thử lại</button>
 {error.includes('đăng nhập') && <a className="text-button" href="/login">Đăng nhập lại</a>}</div>}
