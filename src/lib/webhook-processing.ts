@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { db } from './db';
 import { lockConversation, lockPage } from './locking';
 import { notify, scheduleAi } from './queue';
+import { getRuntimeConfig } from './runtime-config';
 const eventSchema = z.object({
   sender: z.object({ id: z.string() }).optional(), recipient: z.object({ id: z.string() }).optional(), timestamp: z.number().optional(),
   message: z.object({ mid: z.string(), text: z.string().optional(), is_echo: z.boolean().optional(), app_id: z.number().optional(), attachments: z.array(z.unknown()).optional() }).optional(),
@@ -40,6 +41,7 @@ export async function prunePendingReceipts(retentionDays = 7): Promise<number> {
   return pruned.count;
 }
 export async function processWebhook(payload: unknown) {
+  const runtime = await getRuntimeConfig();
   const body = payload as { entry?: { id: string; messaging?: unknown[] }[] };
   for (const entry of body.entry || []) {
     const page = await db.page.findUnique({ where: { metaId: entry.id } });
@@ -77,7 +79,7 @@ export async function processWebhook(payload: unknown) {
       const mid = e.message?.mid || e.postback?.mid || `postback-${page.metaId}-${psid}-${e.timestamp}`;
       if (await db.message.findUnique({ where: { metaId: mid } })) continue;
       // Own app echo can arrive before the outbound transaction commits: never import it as an external human reply.
-      if (echo && String(e.message?.app_id) === process.env.META_APP_ID) continue;
+      if (echo && String(e.message?.app_id) === runtime.metaAppId) continue;
       const timestamp = new Date(Math.min(e.timestamp || Date.now(), Date.now()));
       const result = await db.$transaction(async tx => {
         await lockPage(tx, page.id);

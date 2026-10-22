@@ -4,6 +4,7 @@ import { jsonEvidence } from './knowledge';
 import { lockConversation, lockPage } from './locking';
 import { canAiSend } from './security';
 import { notify } from './queue';
+import { getRuntimeConfig } from './runtime-config';
 export async function processAi(conversationId: string, version: number) {
   const conversation = await db.conversation.findUnique({ where: { id: conversationId }, include: { page: true, messages: { where: { role: 'CUSTOMER' }, orderBy: { receivedAt: 'desc' }, take: 10 } } });
   if (!conversation || !canAiSend(conversation.status, conversation.version, version, conversation.page.aiEnabled) || conversation.resolved) return;
@@ -16,13 +17,14 @@ export async function processAi(conversationId: string, version: number) {
   let result;
   try { result = await answerQuestion(conversation.page, question); }
   catch { result = { decision: 'NEEDS_HUMAN' as const, answer: null, sources: [], error: 'Không thể tạo câu trả lời có căn cứ. Cần nhân viên.' }; }
+  const runtime = await getRuntimeConfig();
   await db.$transaction(async tx => {
     await lockPage(tx, conversation.pageId);
     await lockConversation(tx, conversationId);
     const current = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: { page: true } });
     if (!canAiSend(current.status, current.version, version, current.page.aiEnabled) || current.resolved || current.page.knowledgeRevision !== conversation.page.knowledgeRevision) return;
     if (await tx.aiRun.findUnique({ where: { conversationId_controlVersion: { conversationId, controlVersion: version } } })) return;
-    await tx.aiRun.create({ data: { conversationId, controlVersion: version, question, answer: result.answer, decision: result.decision, sources: jsonEvidence(result.sources), model: process.env.AI_CHAT_MODEL || 'demo-extractive', error: result.error } });
+    await tx.aiRun.create({ data: { conversationId, controlVersion: version, question, answer: result.answer, decision: result.decision, sources: jsonEvidence(result.sources), model: runtime.aiChatModel || 'demo-extractive', error: result.error } });
     if (result.decision === 'NEEDS_HUMAN') {
       await tx.conversation.update({ where: { id: conversationId }, data: { status: 'NEEDS_HUMAN', version: { increment: 1 } } }); return;
     }

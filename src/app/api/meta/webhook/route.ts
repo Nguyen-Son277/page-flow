@@ -3,8 +3,10 @@ import { z } from 'zod';
 import { db } from '@/lib/db';
 import { lockPage } from '@/lib/locking';
 import { validSignature } from '@/lib/security';
+import { getRuntimeConfig } from '@/lib/runtime-config';
 export async function GET(req: Request) {
-  const p = new URL(req.url).searchParams, token = process.env.META_VERIFY_TOKEN;
+  const runtime = await getRuntimeConfig();
+  const p = new URL(req.url).searchParams, token = runtime.metaVerifyToken;
   const actual = Buffer.from(p.get('hub.verify_token') || ''), expected = Buffer.from(token || '');
   if (token && p.get('hub.mode') === 'subscribe' && actual.length === expected.length && timingSafeEqual(actual, expected)) return new Response(p.get('hub.challenge'), { status: 200 });
   return new Response('Forbidden', { status: 403 });
@@ -14,7 +16,8 @@ export async function POST(req: Request) {
   if (Number(req.headers.get('content-length') || 0) > 2_000_000) return new Response('Too large', { status: 413 });
   const body = await req.text();
   if (Buffer.byteLength(body) > 2_000_000) return new Response('Too large', { status: 413 });
-  if (!validSignature(body, req.headers.get('x-hub-signature-256'), process.env.META_APP_SECRET || '')) return new Response('Forbidden', { status: 403 });
+  const runtime = await getRuntimeConfig();
+  if (!validSignature(body, req.headers.get('x-hub-signature-256'), runtime.metaAppSecret || '')) return new Response('Forbidden', { status: 403 });
   try {
     const data = webhook.parse(JSON.parse(body));
     const id = createHash('sha256').update(body).digest('hex');

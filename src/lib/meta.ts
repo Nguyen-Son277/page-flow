@@ -1,4 +1,52 @@
 import { decrypt } from './security';
+import { getRuntimeConfig } from './runtime-config';
+
+export type MetaConfig = {
+  appId: string;
+  appSecret: string;
+  graphVersion: string;
+  appUrl: string;
+};
+
+/** Raised when the server cannot construct a safe Meta OAuth configuration. */
+export class MetaConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MetaConfigError';
+  }
+}
+
+/**
+ * Read and validate the values shared by the OAuth connect and callback routes.
+ * Trimming here avoids a surprisingly common `.env` trailing-space failure and
+ * returning one normalized URL keeps both OAuth requests byte-for-byte aligned.
+ */
+export async function getMetaConfig(): Promise<MetaConfig> {
+  const runtime = await getRuntimeConfig();
+  const appId = runtime.metaAppId?.trim() || '';
+  const appSecret = runtime.metaAppSecret?.trim() || '';
+  const graphVersion = runtime.metaGraphVersion?.trim() || '';
+  const appUrlValue = runtime.appUrl?.trim() || '';
+  const missing = [
+    !appId && 'META_APP_ID',
+    !appSecret && 'META_APP_SECRET',
+    !graphVersion && 'META_GRAPH_VERSION',
+    !appUrlValue && 'APP_URL',
+  ].filter((name): name is string => Boolean(name));
+  if (missing.length) throw new MetaConfigError(`Chưa cấu hình Meta App phía máy chủ: thiếu ${missing.join(', ')}`);
+  if (!/^v\d+\.\d+$/.test(graphVersion)) {
+    throw new MetaConfigError('META_GRAPH_VERSION phải có dạng vN.N (ví dụ: v21.0)');
+  }
+
+  let appUrl: URL;
+  try { appUrl = new URL(appUrlValue); }
+  catch { throw new MetaConfigError('APP_URL phải là URL tuyệt đối hợp lệ (http hoặc https)'); }
+  if (!['http:', 'https:'].includes(appUrl.protocol) || appUrl.username || appUrl.password || appUrl.search || appUrl.hash || (appUrl.pathname !== '' && appUrl.pathname !== '/')) {
+    throw new MetaConfigError('APP_URL phải là URL gốc dùng http hoặc https, không kèm đường dẫn hay thông tin đăng nhập');
+  }
+  return { appId, appSecret, graphVersion, appUrl: appUrl.origin };
+}
+
 // Graph error codes that mean the Page token is invalid/expired or that the token is
 // missing a permission the Page needs. Meta reshuffles these codes between Graph
 // versions, so this list MUST be re-checked against the Meta Graph API error reference
@@ -24,24 +72,24 @@ function metaErrorMessage(value: unknown): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, 200) : undefined;
 }
-export function graphUrl(path: string) {
-  const version = process.env.META_GRAPH_VERSION;
+export function graphUrl(path: string, version = process.env.META_GRAPH_VERSION?.trim()) {
   if (!version || !/^v\d+\.\d+$/.test(version)) throw new Error('Cần cấu hình META_GRAPH_VERSION được hỗ trợ');
   return `https://graph.facebook.com/${version}/${path}`;
 }
 export class MetaError extends Error {
   constructor(public code: number, public retryable: boolean, public uncertain: boolean, message = 'Meta từ chối yêu cầu') { super(message); }
 }
-export async function metaGet(path: string, token: string): Promise<MetaGraphResponse> {
-  const response = await fetch(graphUrl(path), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000), cache: 'no-store' });
+export async function metaGet(path: string, token: string, version?: string): Promise<MetaGraphResponse> {
+  const response = await fetch(graphUrl(path, version), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000), cache: 'no-store' });
   const result = await response.json() as MetaGraphResponse;
   if (!response.ok || result.error) throw new MetaError(result.error?.code || response.status, response.status === 429, false, metaErrorMessage(result.error?.message));
   return result;
 }
 export async function sendMeta(page: { metaId: string; tokenEncrypted: string | null }, psid: string, text: string) {
-  if (process.env.META_SEND_ENABLED !== 'true' || !page.tokenEncrypted) throw new MetaError(0, false, false, 'Chưa cho phép gửi Meta');
+  const runtime = await getRuntimeConfig();
+  if (!runtime.metaSendEnabled || !page.tokenEncrypted) throw new MetaError(0, false, false, 'Chưa cho phép gửi Meta');
   let endpoint: string, token: string;
-  try { endpoint = graphUrl(`${page.metaId}/messages`); token = decrypt(page.tokenEncrypted); }
+  try { endpoint = graphUrl(`${page.metaId}/messages`, runtime.metaGraphVersion); token = decrypt(page.tokenEncrypted); }
   catch { throw new MetaError(0, false, false, 'Cấu hình API hoặc khóa mã hóa không hợp lệ; chưa gửi request'); }
   let response: Response;
   try {

@@ -4,6 +4,7 @@ import { requireAdmin, HttpError, errorResponse, audit } from '@/lib/auth';
 import { encrypt, decrypt } from '@/lib/security';
 import { lockPage } from '@/lib/locking';
 import { graphUrl } from '@/lib/meta';
+import { getRuntimeConfig } from '@/lib/runtime-config';
 type Candidate = { id: string; name: string; category: string; access_token: string };
 export async function GET() {
   try {
@@ -17,6 +18,7 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const user = await requireAdmin(req);
+    const runtime = await getRuntimeConfig();
     const b = z.object({ selectionId: z.string(), pageIds: z.array(z.string()).min(1).max(2000) }).parse(await req.json());
     const selection = await db.metaSelection.findFirst({ where: { id: b.selectionId, userId: user.id, expiresAt: { gt: new Date() } } });
     if (!selection) throw new HttpError(400, 'Danh sách Page đã hết hạn. Kết nối lại.');
@@ -33,7 +35,7 @@ export async function POST(req: Request) {
       }, { maxWait: 30000, timeout: 30000 });
       let connected = false;
       try {
-        const r = await fetch(graphUrl(`${p.id}/subscribed_apps`), { method: 'POST', headers: { Authorization: `Bearer ${p.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ subscribed_fields: ['messages', 'messaging_postbacks', 'message_deliveries', 'message_reads'] }), signal: AbortSignal.timeout(15000) });
+        const r = await fetch(graphUrl(`${p.id}/subscribed_apps`, runtime.metaGraphVersion), { method: 'POST', headers: { Authorization: `Bearer ${p.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ subscribed_fields: ['messages', 'messaging_postbacks', 'message_deliveries', 'message_reads'] }), signal: AbortSignal.timeout(15000) });
         const data = await r.json(); connected = r.ok && data.success === true;
       } catch {}
       await db.page.updateMany({ where: { id: page.id, knowledgeRevision: page.knowledgeRevision }, data: connected ? { connection: 'CONNECTED', lastError: null, tokenCheckedAt: null } : { connection: 'ERROR', lastError: 'Không đăng ký được webhook. Kiểm tra quyền App và kết nối lại.' } });

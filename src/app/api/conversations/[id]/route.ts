@@ -6,6 +6,7 @@ import { notify, scheduleAi } from '@/lib/queue';
 import { allowedToSend } from '@/lib/security';
 import { waitForAiSends } from '@/lib/outbound';
 import { enforceRateLimit, limitFromEnv } from '@/lib/rate-limit';
+import { getRuntimeConfig } from '@/lib/runtime-config';
 type Context = { params: Promise<{ id: string }> };
 async function access(id: string, user: { id: string; role: string }) {
   const c = await db.conversation.findUnique({ where: { id } });
@@ -27,6 +28,7 @@ export async function POST(req: Request, ctx: Context) {
   try {
     const user = await requireUser(req), { id } = await ctx.params;
     const { c, page } = await access(id, user);
+    const runtime = await getRuntimeConfig();
     const body = z.object({ action: z.enum(['read', 'takeover', 'resume', 'resolve', 'assign', 'message', 'note', 'demo-incoming']), text: z.string().trim().min(1).max(2000).optional(), assignedTo: z.string().nullable().optional(), idempotencyKey: z.string().min(16).max(100).optional(), seenAt: z.string().datetime().optional() }).parse(await req.json());
     if (body.action === 'assign' && body.assignedTo) {
       const target = await db.user.findUnique({ where: { id: body.assignedTo }, include: { memberships: true } });
@@ -52,7 +54,7 @@ export async function POST(req: Request, ctx: Context) {
         if (!body.idempotencyKey) throw new HttpError(400, 'Thiếu khóa chống gửi trùng');
         const existing = await tx.message.findUnique({ where: { idempotencyKey: body.idempotencyKey } });
         if (existing) { if (existing.conversationId !== id) throw new HttpError(409, 'Khóa gửi đã sử dụng'); return current; }
-        if (!page.demo && (!allowedToSend(current.lastCustomerAt) || process.env.META_SEND_ENABLED !== 'true')) throw new HttpError(400, 'Chưa bật gửi Meta hoặc đã ngoài cửa sổ trả lời cho phép');
+        if (!page.demo && (!allowedToSend(current.lastCustomerAt) || !runtime.metaSendEnabled)) throw new HttpError(400, 'Chưa bật gửi Meta hoặc đã ngoài cửa sổ trả lời cho phép');
       }
       const incoming = body.action === 'demo-incoming', note = body.action === 'note', receivedAt = new Date();
       const updated = await tx.conversation.update({ where: { id }, data: note ? {} : { version: { increment: 1 }, lastMessageAt: new Date(), preview: body.text, resolved: false, ...(incoming ? { lastCustomerAt: receivedAt, lastIncomingAt: receivedAt } : { status: 'HUMAN_ACTIVE', assignedTo: user.id }) } });

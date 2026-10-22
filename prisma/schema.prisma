@@ -200,6 +200,22 @@ model OAuthState {
   userId String
   expiresAt DateTime
 }
+model AppSetting {
+  id String @id @default("singleton")
+  metaAppId String?
+  metaGraphVersion String?
+  metaAppSecretEncrypted String?
+  metaVerifyTokenEncrypted String?
+  metaSendEnabled Boolean @default(false)
+  aiChatBaseUrl String?
+  aiChatModel String?
+  aiChatApiKeyEncrypted String?
+  aiEmbeddingBaseUrl String?
+  aiEmbeddingModel String?
+  aiEmbeddingApiKeyEncrypted String?
+  aiEmbeddingDimensions String?
+  updatedAt DateTime @updatedAt
+}
 // A delivery/read receipt that arrived before the outbound message stored its Meta id or
 // sent time. It is replayed once the message row can match, then deleted; `key` keeps a
 // repeated receipt from creating a second row.

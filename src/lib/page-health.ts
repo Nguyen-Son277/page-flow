@@ -1,6 +1,7 @@
 import { db } from './db';
 import { decrypt } from './security';
 import { MetaError, isTokenOrPermissionError, metaGet } from './meta';
+import { getRuntimeConfig } from './runtime-config';
 // Stable prefix so a later successful check can tell a token warning apart from an
 // unrelated operator-facing error and clear only the token one.
 export const TOKEN_FAILURE_PREFIX = 'Token hết hạn hoặc thiếu quyền; cần kết nối lại';
@@ -17,6 +18,7 @@ export async function checkPageTokens(take = 5): Promise<{ checked: number; fail
   // A non-positive or non-finite interval disables the checker entirely.
   if (!Number.isFinite(hours) || hours <= 0) return { checked: 0, failed: 0 };
   const cutoff = new Date(Date.now() - hours * 3600000);
+  const runtime = await getRuntimeConfig();
   const pages = await db.page.findMany({
     where: { demo: false, connection: 'CONNECTED', tokenEncrypted: { not: null }, OR: [{ tokenCheckedAt: null }, { tokenCheckedAt: { lt: cutoff } }] },
     // Never-checked Pages come first so a fresh connection is verified on the next sweep.
@@ -27,7 +29,7 @@ export async function checkPageTokens(take = 5): Promise<{ checked: number; fail
   for (const page of pages) {
     checked += 1;
     try {
-      await metaGet(`${page.metaId}?fields=id`, decrypt(page.tokenEncrypted!));
+      await metaGet(`${page.metaId}?fields=id`, decrypt(page.tokenEncrypted!), runtime.metaGraphVersion);
       // Clear only our own token warning; an unrelated lastError must survive.
       const clearsTokenError = typeof page.lastError === 'string' && page.lastError.startsWith(TOKEN_FAILURE_PREFIX);
       await db.page.update({ where: { id: page.id }, data: clearsTokenError ? { tokenCheckedAt: new Date(), lastError: null } : { tokenCheckedAt: new Date() } });

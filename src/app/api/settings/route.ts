@@ -3,6 +3,37 @@ import { db } from '@/lib/db';
 import { requireAdmin, errorResponse, audit, HttpError } from '@/lib/auth';
 import { createMember, deleteMember, resetMemberPassword } from '@/lib/accounts';
 import { dismissFailedSend, listFailedSends, retryFailedSend } from '@/lib/reconciliation';
+import { getRuntimeConfig, saveRuntimeConfig, RuntimeConfigError } from '@/lib/runtime-config';
+
+const integrationUrl = z.string().trim().max(2000).refine(value => {
+  if (!value) return true;
+  try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash; }
+  catch { return false; }
+}, 'URL tích hợp phải dùng http hoặc https và không chứa thông tin đăng nhập, query hay fragment');
+const integrationFields = {
+  metaAppId: z.string().trim().max(100).regex(/^\d*$/, 'Meta App ID chỉ gồm chữ số'),
+  metaAppSecret: z.string().trim().max(4000).optional(),
+  metaVerifyToken: z.string().trim().max(4000).optional(),
+  metaGraphVersion: z.string().trim().max(30).regex(/^(?:v\d+\.\d+)?$/, 'Phiên bản Graph API phải có dạng vN.N'),
+  aiChatBaseUrl: integrationUrl,
+  aiChatModel: z.string().trim().max(200),
+  aiChatApiKey: z.string().trim().max(4000).optional(),
+  aiEmbeddingBaseUrl: integrationUrl,
+  aiEmbeddingModel: z.string().trim().max(200),
+  aiEmbeddingApiKey: z.string().trim().max(4000).optional(),
+  metaSendEnabled: z.boolean(),
+  aiEmbeddingDimensions: z.number().int().min(1).max(10000),
+};
+function publicIntegrations(config: Awaited<ReturnType<typeof getRuntimeConfig>>) {
+  return {
+    metaAppId: config.metaAppId, metaGraphVersion: config.metaGraphVersion, metaSendEnabled: config.metaSendEnabled,
+    aiChatBaseUrl: config.aiChatBaseUrl, aiChatModel: config.aiChatModel,
+    aiEmbeddingBaseUrl: config.aiEmbeddingBaseUrl, aiEmbeddingModel: config.aiEmbeddingModel,
+    aiEmbeddingDimensions: config.aiEmbeddingDimensions,
+    hasMetaAppSecret: !!config.metaAppSecret, hasMetaVerifyToken: !!config.metaVerifyToken,
+    hasAiChatApiKey: !!config.aiChatApiKey, hasAiEmbeddingApiKey: !!config.aiEmbeddingApiKey,
+  };
+}
 // A FAILED event blocks AI replies for its Page: answering on top of an event that was
 // never applied would use stale state. An administrator must either replay it or
 // explicitly accept the loss; neither happens automatically.
@@ -16,6 +47,7 @@ function describeEvent(payload: unknown) {
 export async function GET() {
   try {
     await requireAdmin();
+    const runtime = await getRuntimeConfig();
     const [members, pending, failed, failedEvents, failedSends, logs] = await Promise.all([
       db.user.findMany({ select: { id: true, name: true, email: true, username: true, role: true, memberships: { select: { pageId: true } } }, orderBy: { createdAt: 'asc' } }),
       db.outboundJob.count({ where: { state: 'PENDING' } }),
@@ -28,8 +60,8 @@ export async function GET() {
     const metaIds = [...new Set(described.flatMap(event => event.pageIds))];
     const pages = metaIds.length ? await db.page.findMany({ where: { metaId: { in: metaIds } }, select: { metaId: true, name: true } }) : [];
     const nameByMetaId = new Map(pages.map(page => [page.metaId, page.name]));
-    return Response.json({ appUrl: process.env.APP_URL || 'http://localhost:3000', webhookUrl: `${process.env.APP_URL || 'http://localhost:3000'}/api/meta/webhook`, oauthUrl: `${process.env.APP_URL || 'http://localhost:3000'}/api/meta/callback`, metaConfigured: !!(process.env.META_APP_ID && process.env.META_APP_SECRET && process.env.META_GRAPH_VERSION && process.env.META_VERIFY_TOKEN), sendEnabled: process.env.META_SEND_ENABLED === 'true', aiConfigured: !!(process.env.AI_API_KEY && process.env.AI_CHAT_MODEL), queue: { pending, failed, failedWebhooks: described.length }, failedEvents: described.map(event => ({ ...event, pages: event.pageIds.map(metaId => nameByMetaId.get(metaId) || metaId) })), failedSends, members: members.map(({ memberships, ...m }) => ({ ...m, pageIds: memberships.map(x => x.pageId) })), audit: logs });
-  } catch (e) { return errorResponse(e); }
+    return Response.json({ ...publicIntegrations(runtime), appUrl: runtime.appUrl, webhookUrl: `${runtime.appUrl}/api/meta/webhook`, oauthUrl: `${runtime.appUrl}/api/meta/callback`, metaConfigured: !!(runtime.metaAppId && runtime.metaAppSecret && runtime.metaGraphVersion && runtime.metaVerifyToken), sendEnabled: runtime.metaSendEnabled, aiConfigured: !!(runtime.aiChatApiKey && runtime.aiChatModel), queue: { pending, failed, failedWebhooks: described.length }, failedEvents: described.map(event => ({ ...event, pages: event.pageIds.map(metaId => nameByMetaId.get(metaId) || metaId) })), failedSends, members: members.map(({ memberships, ...m }) => ({ ...m, pageIds: memberships.map(x => x.pageId) })), audit: logs });
+  } catch (e) { return errorResponse(e instanceof RuntimeConfigError ? new HttpError(400, e.message) : e); }
 }
 export async function POST(req: Request) {
   try {
@@ -42,9 +74,14 @@ export async function POST(req: Request) {
       z.object({ action: z.literal('webhook-replay'), id: z.string().min(1) }),
       z.object({ action: z.literal('webhook-dismiss'), id: z.string().min(1) }),
       z.object({ action: z.literal('retry-send'), messageId: z.string().min(1) }),
-      z.object({ action: z.literal('dismiss-send'), messageId: z.string().min(1) })
+      z.object({ action: z.literal('dismiss-send'), messageId: z.string().min(1) }),
+      z.object({ action: z.literal('save-integrations'), ...integrationFields })
     ]).parse(await req.json());
-    if (b.action === 'create-user') {
+    if (b.action === 'save-integrations') {
+      const { action: _action, ...integration } = b;
+      await saveRuntimeConfig({ ...integration, metaAppSecret: integration.metaAppSecret || undefined, metaVerifyToken: integration.metaVerifyToken || undefined, aiChatApiKey: integration.aiChatApiKey || undefined, aiEmbeddingApiKey: integration.aiEmbeddingApiKey || undefined });
+      await audit(user.id, 'settings.integrations', 'runtime');
+    } else if (b.action === 'create-user') {
       await createMember({ name: b.name, email: b.email, username: b.username, password: b.password, role: b.role, actorId: user.id });
     } else if (b.action === 'grant-page') {
       if (b.enabled) await db.pageMember.upsert({ where: { pageId_userId: { pageId: b.pageId, userId: b.userId } }, create: { pageId: b.pageId, userId: b.userId }, update: {} });
@@ -70,5 +107,5 @@ export async function POST(req: Request) {
       await audit(user.id, 'webhook.dismiss', b.id);
     }
     return Response.json({ ok: true });
-  } catch (e) { return errorResponse(e); }
+  } catch (e) { return errorResponse(e instanceof RuntimeConfigError ? new HttpError(400, e.message) : e); }
 }
